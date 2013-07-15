@@ -1,4 +1,4 @@
-/* Brody's note - This file following this comment is taken directly from Freescale website.
+/* Brody's note - This file following this comment is taken directly from the Freescale website.
  * @ http://cache.freescale.com/files/sensors/software_tools/MMA7660FC_RDHF.h?fr=gtl
  * With one exception -- the "PD 0x0A" section which clashes with Atmel/Arduino PINs of the same name are modified.
  * This code is not (necessarily?) in the public domain.
