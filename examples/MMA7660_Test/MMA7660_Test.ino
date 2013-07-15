@@ -37,7 +37,7 @@ void isr_accel() {
 
 //This is the "filtered callback" function called from the MMA7660 library.
 //If you want to get some filtered detections and nicely enumerated types of the interrupt use something like
-// this this (in conjunction with filterProcessTime and filterProcessInterrupt)
+// this (in conjunction with filterProcessTime and filterProcessInterrupt)
 //If you want to process it yourself then you should do your own function that processes TILT interrupt (readTiltStatus)
 void accel_interrupt_callback( MMA7660::INTERRUPT p_interrupt){
 	Serial.print( micros() );
