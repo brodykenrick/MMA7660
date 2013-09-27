@@ -15,6 +15,41 @@ Function comments are with the implementation in the .cpp and not in this header
 
 #include <Arduino.h>
 
+//Select which TWI/I2C/Wire interface should be used. Only one of these should be selected.
+#define MMA7660_USE_NB_I2C        //!< I2C from NinjaBlocks @ Github: https://github.com/ninjablocks/arduino/tree/master/I2C
+//#define MMA7660_USE_ARDUINO_WIRE
+//#define MMA7660_USE_SOFT_TWI
+
+
+#if defined(MMA7660_USE_NB_I2C)
+
+#include <I2C.h>
+#undef MMA7660_USE_ARDUINO_WIRE
+#undef MMA7660_USE_SOFT_TWI
+
+#elif defined(MMA7660_USE_ARDUINO_WIRE)
+
+#include <Wire.h>
+#undef MMA7660_USE_NB_I2C
+#undef MMA7660_USE_SOFT_TWI
+
+#elif defined(MMA7660_USE_SOFT_TWI)
+
+#include <SoftTWI.h>
+#undef MMA7660_USE_NB_I2C
+#undef MMA7660_USE_ARDUINO_WIRE
+
+// Set soft TWI pin numbers for your configuration.
+#define  MMA7660_SOFT_TWI_SDA_PIN ((uint8_t)SDA)
+#define  MMA7660_SOFT_TWI_SCL_PIN ((uint8_t)SCL)
+
+#else
+
+#error "Wire/I2C/TWI not selected!"
+
+#endif
+
+
 #define MMA7660_CTRL_ID_DEFAULT (0x4C) //!<This is the factory pre-configured I2C address for an MMA7660
 
 //#define MMA7660_ENABLE_INCOMPLETE_CODE //!<Turn on some experimental code....
@@ -35,6 +70,12 @@ class MMA7660
 		//TODO: A "getOrientation" function
 
 		MMA7660();
+		
+		void setInterruptActiveHigh(); //!< vs. active LOW (default)
+		void setInterruptActiveLow();
+		void setInterruptPushPull();   //!< vs. open drain (default)
+		void setInterruptOpenDrain();
+		
 		boolean init();
 
 		void setSampleRate(int samplesPerSecond);
@@ -51,6 +92,8 @@ class MMA7660
 		void enableAutomaticInterrupt( );
 #endif /*MMA7660_ENABLE_INCOMPLETE_CODE*/
         void disableAllInterrupts();
+
+
 
 		int     readAxis( AXIS );
 		
@@ -73,6 +116,10 @@ class MMA7660
 
         int 			samples_per_second;
         
+        uint8_t active_mode;
+
+        boolean tapInterruptEnabled;        //Need to see if these are enabled - as the device seems to raise taps even when disabled......
+        
         boolean frontBackChangeInterruptEnabled;        //Need to see if these are enabled - as we can't tell the difference after we check the TILT reg
 		boolean upDownLeftRightChangeInterruptEnabled;
 
@@ -84,6 +131,8 @@ class MMA7660
         void 	setFilteredCallbackFunction( void (*fn_filtered_callback)(MMA7660::INTERRUPT) );
         boolean filterProcessTime( unsigned long current_time_ms );
         void    filterProcessInterrupt( boolean realInterrupt, unsigned long current_time_ms );
+        
+        boolean filterProcessingStillUnderway( unsigned long current_time_ms );
 
 	private:
 

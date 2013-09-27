@@ -18,7 +18,19 @@ MMA7660Board.GND to GND
 The test program will provide various outputs to the Serial based on polling the unit and interrupts from tapping, shaking or rotating the unit.
 */
 
-#include <I2C.h> //I2C from NinjaBlocks @ Github: https://github.com/ninjablocks/arduino/tree/master/I2C
+
+//Include a TWI/I2C interface for Arduino to link against.
+//The actual selection is made inside the library header file.
+#if defined(MMA7660_USE_NB_I2C)
+//I2C from NinjaBlocks @ Github: https://github.com/ninjablocks/arduino/tree/master/I2C
+#include <I2C.h>
+#elif defined(MMA7660_USE_ARDUINO_WIRE)
+#include <Wire.h>
+#elif defined(MMA7660_USE_SOFT_TWI)
+#include <SoftTWI.h> //In this (MMA7660) github repository (sourced from http://code.google.com/p/fivevolt/source/browse/Quadcopter/Arduino/Telemetry/SoftTWI.h/.cpp)
+#endif
+//NOTE: The above '#if's don't really remove the headers/libs from the project because of the way the Arduino IDE determines libraries. Comment it out see the real effect on size.
+
 #include <MMA7660.h>
 #include <PinChangeInt.h> //Hardware External Interrupt Pins run out and the pinchangeint library is used to get a few more usable interrupts
 
@@ -67,8 +79,6 @@ void accel_interrupt_callback( MMA7660::INTERRUPT p_interrupt){
 }
 
 
-
-
 void setup() {
   Serial.begin(115200);
 
@@ -77,7 +87,6 @@ void setup() {
   
   Serial.println("MMA7660 Testing");
   
-
   if( !g_Accel.init() ){
       Serial.println("PROBLEM! Initialisation failure. Module not present? Aborting...");
       delay(100);
@@ -132,7 +141,7 @@ void periodic_change_sample_rate( unsigned long current_time_ms )
 
 //Sample the axes and print the values
 unsigned long       accel_sample_last_time_ms = 0;
-const unsigned long accel_sample_interval_ms = 5 * 1000;           // interval at which to sample (milliseconds) the accelerometer
+const unsigned long accel_sample_interval_ms  = 5 * 1000;           // interval at which to sample (milliseconds) the accelerometer
 
 void periodic_print_accel_info( unsigned long current_time_ms )
 {
@@ -160,9 +169,9 @@ void periodic_print_accel_info( unsigned long current_time_ms )
 void loop() {
 	unsigned long current_time_ms = millis();
 
-        periodic_change_sample_rate(current_time_ms); //Change smapling rate for testing the device at different SPS.
+        periodic_change_sample_rate(current_time_ms); //Change sampling rate for testing the device at different SPS.
 
-	periodic_print_accel_info(current_time_ms); //Read axes adn print out periodically.
+	periodic_print_accel_info(current_time_ms); //Read axes and print out periodically.
 
 
         //Process/filter the interrupts and raise callbacks to accel_interrupt_callback indicating a type of MMA7660::INTERRUPT as appropriate

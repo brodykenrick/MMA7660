@@ -25,42 +25,100 @@ Move the exposed fake internal types as uint_8 to an internal subclass to have p
 */
 
 #include <Arduino.h>
-#include <I2C.h>
+
 #include "MMA7660.h"
 #include "MMA7660FC_RDHF.h" //Freescale's register definitions (a little ugly but might help in future porting efforts...)
 #include <assert.h>
 
-//#define MMA7660_DEBUG //<! Define this for a verbose library
-//TODO: Add __FILE_, __LINE__ and time....
+
+#define MMA7660_DEBUG //<! Define this for a verbose library
 //TODO: Update using PROGMEM and F()
 #ifdef MMA7660_DEBUG
   	#define MMA7660_DEBUG_PRINT(x)  	(Serial.print(x))
+  	#define MMA7660_DEBUG_PRINT2(x,y)  	(Serial.print(x, y))
 	#define MMA7660_DEBUG_PRINTLN(x)	(Serial.println(x))
+	#define MMA7660_DEBUG_PRINTLN2(x,y)	(Serial.println(x,y))
 #else
 	#define MMA7660_DEBUG_PRINT(x)
+	#define MMA7660_DEBUG_PRINT2(x,y)
 	#define MMA7660_DEBUG_PRINTLN(x)
+	#define MMA7660_DEBUG_PRINTLN2(x,y)
+#endif
+
+#if defined(MMA7660_USE_SOFT_TWI)
+#define Wire (SoftWire) //Hijack Wire as SoftWire -- allows us to reuse some code as-is
+//The SoftTWI library uses the read and write (8-bit) addresses -- so we need conversion functions
+#define SLA_W(address)  (address << 1)
+#define SLA_R(address)  ((address << 1) + 0x01)
 #endif
 
 
+//IPP - Interrupt is push-pull (vs. open drain)
+//IAH - Interrupt is active high (vs. active low)
+//#define ACTIVE_MODE_DEFAULT (MODE_MODE_MASK | MODE_IPP_MASK | MODE_IAH_MASK) //!<The ACTIVE MODE that is used. Code is only tested for this mode. So it is not working with auto-sleep/auto-wake (yet).
+#define ACTIVE_MODE_DEFAULT (MODE_MODE_MASK | MODE_IPP_MASK ) //!<The ACTIVE MODE that is used. Code is only tested for this mode. So it is not working with auto-sleep/auto-wake (yet).
+
+
+
+//Internal
 #define PDET_PDTH_MASK (0x1F)
 
 #define MMA7660_MODE_REGISTER_FROM_HARD_RESET (193) //!<This is what the MMA7660 MODE register is at startup (so we can check the device is present and readable)
 
-#define ACTIVE_MODE (MODE_MODE_MASK | MODE_IPP_MASK | MODE_IAH_MASK) //!<The ACTIVE MODE that is always used. Code is only tested for this mode. So it is not working with auto-sleep/auto-wake.
+//TODO: Add gets later...
+void MMA7660::setInterruptActiveHigh(){ active_mode |=  MODE_IAH_MASK; };
+void MMA7660::setInterruptActiveLow() { active_mode &= ~MODE_IAH_MASK; };
+void MMA7660::setInterruptPushPull()  { active_mode |=  MODE_IPP_MASK; };
+void MMA7660::setInterruptOpenDrain() { active_mode &= ~MODE_IPP_MASK; };
 
 
-MMA7660::MMA7660() {
+
+MMA7660::MMA7660()
+{
+#if defined(MMA7660_USE_NB_I2C)
 	I2c.begin();
+#elif defined(MMA7660_USE_ARDUINO_WIRE)
+    Wire.begin();
+#elif defined(MMA7660_USE_SOFT_TWI)
+    Wire.attach(MMA7660_SOFT_TWI_SDA_PIN, MMA7660_SOFT_TWI_SCL_PIN);
+    Wire.begin();
+#endif
+	active_mode = ACTIVE_MODE_DEFAULT;
+
+    frontBackChangeInterruptEnabled 		= false;
+	upDownLeftRightChangeInterruptEnabled 	= false;
+	tapInterruptEnabled 					= false;
+
+	stored_tilt_status = 0;
+	samples_per_second = 120;
+
+    process_interrupt_last_time_ms = 0;
+
+    shake_initial_time_ms = 0;
+    shake_count = 0;
+    shake_sample_period_ms = 300;
+    shake_count_filter = 6;
+
+    filtered_shake_time_ms = 0;
+    filtered_shake_period_ms = 1000; //One shake per second is all that is allowed.
+
+    fn_filtered_callback = NULL;
 }
 
 //! Check that the device has a mode register that can be set/read as expected at startup.
 boolean MMA7660::modeRegisterAtStartupAsExpected(void) {
     //The I2C library hides(private) the start and readAddress functions so that means a quick "is device there" function is not possible
-    //So we reset the chip MODE to what it should be at hard reset and check that we read out the same thing
+    //So we reset the chip MODE to what it should be at hard reset and check that we read out the same thing (which only confirms that a device that can write and be read is there at the address -- but that is good enough for me...)
+    //set mode to standby to change any settings
+    write(MODE, 0x00);
     write(MODE, MMA7660_MODE_REGISTER_FROM_HARD_RESET);
     uint8_t startup_mode = read(MODE);
-    //MMA7660_DEBUG_PRINT( "MODE : " );
-    //MMA7660_DEBUG_PRINTLN( startup_mode );
+#if 0
+    MMA7660_DEBUG_PRINT( "MODE: " );
+    MMA7660_DEBUG_PRINT2( startup_mode, BIN );
+    MMA7660_DEBUG_PRINT( " | EXPECTED: " );
+    MMA7660_DEBUG_PRINTLN2( MMA7660_MODE_REGISTER_FROM_HARD_RESET, BIN );
+#endif
     return (MMA7660_MODE_REGISTER_FROM_HARD_RESET == startup_mode);
 }
 
@@ -72,22 +130,13 @@ boolean MMA7660::init() {
 	    //set mode to standby to change any settings
 	    write(MODE, 0x00);
 	    write(INTSU, 0x00);
+	    
 	    setSampleRateInternal( 120, true );
-	    write(MODE, ACTIVE_MODE );
+	    write(MODE, active_mode );
 
 	    stored_tilt_status = readTiltStatus( );
 	    
-        frontBackChangeInterruptEnabled = false;
-		upDownLeftRightChangeInterruptEnabled = false;
 
-        process_interrupt_last_time_ms = 0;
-
-        shake_initial_time_ms = 0;
-        shake_count = 0;
-        shake_sample_period_ms = 300;
-        shake_count_filter = 6;
-        filtered_shake_time_ms = 0;
-        filtered_shake_period_ms = 1000; //One shake per second is all that is allowed.
     }
     return init_ok;
 }
@@ -141,7 +190,7 @@ void MMA7660::setSampleRateInternal(int samplesPerSecond, boolean stateAlreadyNo
 	}
 	if(!stateAlreadyNotActive)
 	{
-		write(MODE, ACTIVE_MODE );
+		write(MODE, active_mode );
 	}
 }
 
@@ -160,7 +209,7 @@ void MMA7660::rewriteIntSURegister(uint8_t valueToBitwiseOR, boolean stateAlread
   	write(INTSU, readInterruptStatus() | valueToBitwiseOR ); //turn on by ORing
   	if(!stateAlreadyNotActive)
 	{
-  		write(MODE, ACTIVE_MODE );
+  		write(MODE, active_mode );
 	}
 }
 
@@ -179,7 +228,7 @@ void MMA7660::enableTapInterrupt( AXIS pAxis ) {
 		case MMA7660::X: 	axis = PDET_XDA_MASK; break;
 		case MMA7660::Y: 	axis = PDET_YDA_MASK; break;
 		case MMA7660::Z: 	axis = PDET_ZDA_MASK; break;
-		default: 	assert(false);
+		default: 	assert(false); break;
 	}
 	write(MODE, 0x00);
 	rewriteIntSURegister(INTSU_PDINT_MASK); //turn on tap/pulse interrupt
@@ -189,7 +238,8 @@ void MMA7660::enableTapInterrupt( AXIS pAxis ) {
 	write(PDET, axis | (PDET_PDTH_MASK & TAP_THRESHOLD ) );
 	//Set Tap detection debounce filter to N measurements (max of 255)
 	write(PD, (PD_PD_MASK & TAP_DEBOUNCE ));
-	write(MODE, ACTIVE_MODE );
+	tapInterruptEnabled = true;
+	write(MODE, active_mode );
 }
 
 //! Shake interrupt enable.
@@ -205,26 +255,26 @@ void MMA7660::enableShakeInterrupt( AXIS pAxis ) {
 		case MMA7660::XZ: 	axis = (INTSU_SHINTX_MASK | INTSU_SHINTZ_MASK); break;
 		case MMA7660::YZ: 	axis = (INTSU_SHINTY_MASK | INTSU_SHINTZ_MASK); break;
 		case MMA7660::XYZ: 	axis = (INTSU_SHINTX_MASK | INTSU_SHINTY_MASK | INTSU_SHINTZ_MASK); break;
-		default: 	assert(false);
+		default: 	assert(false); break;
 	}
 	rewriteIntSURegister(axis);
-	write(MODE, ACTIVE_MODE );
+	write(MODE, active_mode );
 }
 
 //!<Front:Back orientation change interrupt enable
 void MMA7660::enableFrontBackChangeInterrupt( ) {
 	write(MODE, 0x00); //No sleep count
 	rewriteIntSURegister(INTSU_FBINT_MASK); //Front:back interrupts enabled
-	write(MODE, ACTIVE_MODE );
     frontBackChangeInterruptEnabled = true;
+	write(MODE, active_mode );
 }
 
 //!<Up:Down:Left:Right orientation change interrupt enable
 void MMA7660::enableUpDownLeftRightChangeInterrupt( ) {
 	write(MODE, 0x00); //No sleep count
 	rewriteIntSURegister(INTSU_PLINT_MASK); //Up:Down:Left:Right interrupts enabled
-	write(MODE, ACTIVE_MODE );
 	upDownLeftRightChangeInterruptEnabled = true;
+	write(MODE, active_mode );
 }
 
 #if MMA7660_ENABLE_INCOMPLETE_CODE
@@ -232,7 +282,7 @@ void MMA7660::enableUpDownLeftRightChangeInterrupt( ) {
 void MMA7660::enableExitAutoSleepInterrupt( ) {
 	write(MODE, 0x00); //No sleep count
 	rewriteIntSURegister(INTSU_ASINT_MASK);
-	write(MODE, ACTIVE_MODE );
+	write(MODE, active_mode );
 }
 #endif /*MMA7660_ENABLE_INCOMPLETE_CODE*/
 
@@ -243,7 +293,7 @@ void MMA7660::enableExitAutoSleepInterrupt( ) {
 void MMA7660::enableAutomaticInterrupt( ) {
 	write(MODE, 0x00);
 	rewriteIntSURegister(INTSU_GINT_MASK);
-	write(MODE, ACTIVE_MODE );
+	write(MODE, active_mode );
 }
 #endif /*MMA7660_ENABLE_INCOMPLETE_CODE*/
 
@@ -251,9 +301,10 @@ void MMA7660::enableAutomaticInterrupt( ) {
 void MMA7660::disableAllInterrupts() {
 	write(MODE, 0x00);
 	write(INTSU, 0x00);
-	write(MODE, ACTIVE_MODE );
+	tapInterruptEnabled = false;
     frontBackChangeInterruptEnabled = false;
 	upDownLeftRightChangeInterruptEnabled = false;
+	write(MODE, active_mode );
 }
 
 
@@ -315,7 +366,13 @@ void MMA7660::setFilteredCallbackFunction( void (*fn_filtered_callback)(MMA7660:
 	this->fn_filtered_callback = fn_filtered_callback;
 }
 
-//! Allows for some checks to be done for our debounce filtering to be done.
+//! Still doing some stuff (so you shouldn't for example sleep just yet)
+boolean MMA7660::filterProcessingStillUnderway( unsigned long current_time_ms )
+{
+    return (shake_count != 0);
+}
+
+//! Allows for some checks to be done for our debounce filtering.
 //! Returns true if we want to execute a "fake" interrupt to allow for debouncing of tilt status.
 boolean MMA7660::filterProcessTime( unsigned long current_time_ms )
 {
@@ -347,8 +404,6 @@ boolean MMA7660::filterProcessTime( unsigned long current_time_ms )
 			shake_count = 0;
 		}
 	}
-
-
 
 	return l_zRet;
 }
@@ -412,12 +467,15 @@ void MMA7660::filterProcessInterrupt(boolean realInterrupt,
 	    }
 	}
 
-	if( tilt.Bits.PULSE )
-	{
-		//TODO: Filter? Or just trust the internal accel filters....
-		MMA7660_DEBUG_PRINTLN("Tap confirmed (no external filter)....");
-		assert( fn_filtered_callback );
-		fn_filtered_callback( MMA7660::PULSE );
+    if(tapInterruptEnabled) //TODO: Check the data sheet better. This should not be seen unless enabled -- BUT they are....
+    {
+	    if( tilt.Bits.PULSE )
+	    {
+		    //TODO: Filter? Or just trust the internal accel filters....
+		    MMA7660_DEBUG_PRINTLN("Tap (no ext. filter)...");
+		    assert( fn_filtered_callback );
+		    fn_filtered_callback( MMA7660::PULSE );
+	    }
 	}
 
 
@@ -434,7 +492,7 @@ void MMA7660::filterProcessInterrupt(boolean realInterrupt,
 			if( samples_per_second <= 8 )
 			{
 				//If sampling rate is low though it should be trusted...
-				MMA7660_DEBUG_PRINT("Shake (low sampling rate)....");
+				MMA7660_DEBUG_PRINT("Shake (low SPS)...");
 				assert( fn_filtered_callback );
 				fn_filtered_callback( MMA7660::SHAKE );
 			}
@@ -468,14 +526,67 @@ void MMA7660::filterProcessInterrupt(boolean realInterrupt,
 }
 
 //! Write to the device
-void MMA7660::write(const uint8_t registerAddress, const uint8_t data) {
-	I2c.write((uint8_t)MMA7660_CTRL_ID_DEFAULT, registerAddress, data);
+void MMA7660::write(const uint8_t registerAddress, const uint8_t data)
+{
+#if defined(MMA7660_USE_NB_I2C)
+    I2c.write((uint8_t)MMA7660_CTRL_ID_DEFAULT, registerAddress, data);
+#elif defined(MMA7660_USE_ARDUINO_WIRE) || defined(MMA7660_USE_SOFT_TWI)
+//    MMA7660_DEBUG_PRINT( "write(0x" );
+//    MMA7660_DEBUG_PRINT2( registerAddress, HEX );
+//    MMA7660_DEBUG_PRINT( ",0x" );
+//    MMA7660_DEBUG_PRINT2( data, HEX );
+//    MMA7660_DEBUG_PRINTLN( ")" );
+#if defined(MMA7660_USE_ARDUINO_WIRE)
+    Wire.beginTransmission(MMA7660_CTRL_ID_DEFAULT);
+#elif defined(MMA7660_USE_SOFT_TWI)
+    Wire.beginTransmission( SLA_W(MMA7660_CTRL_ID_DEFAULT) );
+#endif
+    Wire.write(registerAddress);
+    Wire.write(data);
+    Wire.endTransmission();
+
+#endif
+
 }
 
 //! Read a byte from the device
-uint8_t MMA7660::read(const uint8_t registerAddress) {
-	I2c.read((uint8_t)MMA7660_CTRL_ID_DEFAULT, registerAddress,(uint8_t) 0x01);
+uint8_t MMA7660::read(const uint8_t registerAddress)
+{
 	//TODO: Add in alert re-read here. Selectively for those reads with an alert field (axes and tilt status)
+#if defined(MMA7660_USE_NB_I2C)
+    I2c.read((uint8_t)MMA7660_CTRL_ID_DEFAULT, registerAddress,(uint8_t) 0x01);
 	return I2c.receive();
+#elif defined(MMA7660_USE_ARDUINO_WIRE) || defined(MMA7660_USE_SOFT_TWI)
+    //Arduino WIRE does not support "repeated starts"
+    //SO we just read all data and select the byte/register we want
+    //http://forum.arduino.cc/index.php?topic=80845.0
+#define NUM_REGISTERS (PD+1)
+
+#if defined(MMA7660_USE_ARDUINO_WIRE)
+    Wire.beginTransmission(MMA7660_CTRL_ID_DEFAULT);
+#elif defined(MMA7660_USE_SOFT_TWI)
+    Wire.beginTransmission( SLA_W(MMA7660_CTRL_ID_DEFAULT) );
+#endif
+    Wire.write( 0x00 );  // We read from the start of the register space
+    Wire.endTransmission();
+#if defined(MMA7660_USE_ARDUINO_WIRE)
+    Wire.requestFrom(MMA7660_CTRL_ID_DEFAULT, NUM_REGISTERS); // and read all registers
+#elif defined(MMA7660_USE_SOFT_TWI)
+    Wire.requestFrom( SLA_R(MMA7660_CTRL_ID_DEFAULT), NUM_REGISTERS); // and read all registers
+#endif
+    
+    uint8_t read_byte = 0xFF;
+    for(int j=0; j<NUM_REGISTERS; j++)
+    {
+        uint8_t read_byte_tmp = Wire.read();
+        if(j == registerAddress)
+        {
+            read_byte = read_byte_tmp;
+        }
+    }
+
+    return read_byte;
+#endif
+
 }
 
